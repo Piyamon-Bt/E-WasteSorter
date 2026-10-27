@@ -46,31 +46,31 @@ curl -s -X POST http://localhost:8000/api/assessments/physical \
 
 ## POST /api/assessments/follow-up
 
-`multipart/form-data`: `device_type`, `observation` (JSON of the observation), `response` (`agree`|`disagree`|`unsure`), `note`, and `views`/`files`. Original supporting photos use their slot id; new photos use `followup`. Returns `FollowUpResult` (`outcome` = `upheld`|`revised`|`not_supported`|`unresolved`, `revised_observation`, `explanation`, `extra_images`).
+`multipart/form-data`: `device_type`, `observation` (JSON of the **current effective** observation, original id kept), `history` (JSON list of earlier `FollowUpResult`s for this observation, oldest first; default `[]`), `response` (`agree`|`disagree`|`unsure`), `note`, and `views`/`files`. Original supporting photos use their slot id; new photos use `followup`. The total number of photos (original + new) is limited by `MAX_IMAGES_PER_REQUEST`, and each file by `MAX_UPLOAD_MB`. Both limits are checked before images are processed or a provider is called; over-limit requests return 422. Returns `FollowUpResult` (`outcome` = `upheld`|`revised`|`not_supported`|`unresolved`, `revised_observation`, `explanation`, `extra_images`).
 
 ## POST /api/checks/plan
 
 ```json
-{"device_type":"mobile","observations":[...],"reviews":[{"observation_id":"obs-2","response":"disagree","note":"","follow_up":null}]}
+{"device_type":"mobile","observations":[...],"reviews":[{"observation_id":"obs-2","response":"disagree","note":"","follow_ups":[]}]}
 ```
 
 Returns `safety` (`blocked`, `risks[]` with `confirmed_by_user`|`unresolved`|`cleared_after_follow_up`, `guidance`), `checks[]` (empty when blocked) and `guidance`.
 
 ## POST /api/checks/evaluate
 
-The same body plus `responses: [{"check_id":"power_on","answer":"pass|fail|unsure|unable|null","note":""}]`. Returns `outcomes[]` (`status` adds `not_answered`, `unavailable_power_failed`, `blocked_by_safety`), `clarifications`, `conditional_findings`, `complete`, `disclaimer`.
+The same body plus `responses: [{"check_id":"power_on","answer":"pass|fail|unsure|unable|null","note":"","accessory_check":null}]`. `accessory_check` applies to `charging` only: `known_working` or `unverified`. Returns `outcomes[]` (`status` adds `not_answered`, `unavailable_power_failed`, `blocked_by_safety`), `clarifications`, `conditional_findings`, `complete`, `disclaimer`.
 
 ## POST /api/market/prices
 
 ```json
 {"device_type":"mobile","identity":{"status":"confirmed","brand":"Brand","model":"Model","variant":null,"storage":"128 GB","ram":null,"evidence_verified":false},
- "country":"TH","area":"Bangkok","condition_summary":["physical_damage: Front glass"],"damaged_parts":["Front glass"],"failed_checks":["charging"]}
+ "country":"TH","area":"Bangkok","condition_summary":["physical_damage: Front glass"],"damaged_parts":["Front glass"],"failed_checks":["charging"],"accessory_ruled_out":false}
 ```
 
 Returns `PriceResearch`:
 - `status`: `complete`, `insufficient_data`, `skipped_unknown_identity` or `failed`.
 - `records[]`: each has `price_type`, `item`, `amount_min`/`amount_max`, `currency`, `market`, `device_state`, `part_quality`, `scenario_id`, `source_url`, `source_title`, `retrieved_at`, `match_level`, `matching_conditions`, `limitations` and `simulated`.
-- `channels[]`, `repair_scenarios[]`, `issues[]`, `dropped_records` and `notes`.
+- `channels[]`, `repair_scenarios[]` (each `id`, `needs[]` (every finding the intervention might address; priced once), `title`, `description`), `issues[]`, `dropped_records` and `notes`.
 
 ## POST /api/services/nearby
 
@@ -85,8 +85,15 @@ Returns `ServicesResult`:
 ## POST /api/recommendations
 
 Body: `AssessmentSnapshot`, which has `device_type`, `physical`, `reviews`, `functional`, `identity`, `location`, `prices` and `services`. Returns:
-- `options[]`: each has `gross_sale`, `repair_cost`, `net_proceeds`, `avoided_cost`, `prerequisites`, `tradeoffs` and `uncertainty`.
-- `financial_ranking` and `resource_ranking`: each has `order`, `unranked`, `explanation` and `complete`.
+- `options[]`: each has:
+  - `sale_channels[]` — one entry per channel and device condition (`price_type`, `device_state`, `range`, `records`, `used_for_calculation`); channels are never pooled.
+  - `sale_basis` — the channel used for `gross_sale`.
+  - `gross_sale`, `repair_cost`, `repair_cost_complete`, `net_proceeds`, `avoided_cost`.
+  - `financial_status` — `complete`, `conditional` or `insufficient`.
+  - `financial_note`, `prerequisites`, `tradeoffs` and `uncertainty`.
+- `financial_ranking` and `resource_ranking`: each has `order` (definitive), `conditional` (numbers on incomplete evidence), `unranked`, `explanation` and `complete`.
+- `disposal_guidance[]` — general end-of-life guidance, kept separate from the options.
+- `safety.risks[].status` (from `/api/checks/plan`) can also be `identified_in_follow_up`.
 - `safety_constrained`, `conditional_findings`, `rankings_differ` and `disclaimers`.
 
 ## POST /api/report

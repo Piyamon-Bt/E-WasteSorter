@@ -95,7 +95,9 @@ def test_safety_risk_constrains_options(configure):
     actions = [o.action for o in rec.options]
     assert rec.safety_constrained
     assert "reuse" not in actions and "resell_as_is" not in actions
-    assert "recycle" in actions
+    # A suspected risk needs inspection; it does not prove the device is beyond repair.
+    assert "recycle" not in actions
+    assert any("battery" in g for g in rec.disposal_guidance)
 
 
 def test_power_failure_alone_does_not_force_recycling(configure):
@@ -103,7 +105,8 @@ def test_power_failure_alone_does_not_force_recycling(configure):
     rec = recommendations.recommend(snapshot(configure(), scenario="normal", answers=answers))
     actions = [o.action for o in rec.options]
     assert "repair_then_reuse" in actions and "resell_as_is" in actions
-    assert rec.resource_ranking.order[-1] == "recycle"
+    assert "recycle" not in actions
+    assert rec.disposal_guidance
 
 
 def test_financial_arithmetic_and_no_double_counted_labor():
@@ -113,11 +116,13 @@ def test_financial_arithmetic_and_no_double_counted_labor():
         record("part_price", 2800, 3200, "front_glass_or_screen", quality="genuine"),
         record("repair_labor", 500, 800, "front_glass_or_screen"),
     ]
-    cost, notes = repair_cost(scenarios, records, "THB")
-    # The combined quote is used; part + labor are not added on top of it.
-    assert (cost.min, cost.max) == (1800, 2400)
-    parts_only, _ = repair_cost(scenarios, records[1:], "THB")
-    assert (parts_only.min, parts_only.max) == (3300, 4000)
+    est = repair_cost(scenarios, records, "THB")
+    # Aftermarket quote (1,800–2,400) and genuine part + labor (3,300–4,000) are alternatives, not a sum.
+    assert (est.cost.min, est.cost.max) == (1800, 4000)
+    assert est.complete
+    assert any("alternatives by part quality" in n for n in est.notes)
+    genuine_only = repair_cost(scenarios, records[1:], "THB")
+    assert (genuine_only.cost.min, genuine_only.cost.max) == (3300, 4000)
 
 
 def test_net_proceeds_are_gross_minus_repair_cost(configure):
@@ -132,7 +137,7 @@ def test_net_proceeds_are_gross_minus_repair_cost(configure):
 def test_charging_symptom_gives_alternative_scenarios():
     scenarios = derive_repair_scenarios("mobile", [], ["charging"])
     assert len(scenarios) >= 3
-    assert len({s.need for s in scenarios}) == 1
+    assert all(s.needs == ["Not charging"] for s in scenarios)
 
 
 def test_rankings_can_differ_and_explain(configure):

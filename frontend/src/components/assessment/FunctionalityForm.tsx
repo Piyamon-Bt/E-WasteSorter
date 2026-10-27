@@ -2,10 +2,15 @@ import { AlertTriangle, Loader2 } from 'lucide-react'
 import { answerLabels, checkStatusLabels } from '../../content/labels'
 import { useAssessment } from '../../state/AssessmentContext'
 import { useNavigation } from '../../state/Navigation'
-import type { CheckAnswer } from '../../types/api'
+import type { AccessoryCheck, CheckAnswer } from '../../types/api'
 import { Button } from '../ui/Button'
 import { ChoiceGroup } from '../ui/ChoiceGroup'
 import { Notice } from '../ui/Notice'
+
+const accessoryOptions: { value: AccessoryCheck; label: string }[] = [
+  { value: 'known_working', label: 'One I know works' },
+  { value: 'unverified', label: 'Only the original / not sure' },
+]
 
 const answerOptions = (Object.keys(answerLabels) as CheckAnswer[]).map((value) => ({ value, label: answerLabels[value] }))
 
@@ -111,6 +116,18 @@ export function FunctionalityForm() {
                         className="mt-1 min-h-11 w-full rounded-md border border-line px-3 text-[15px] text-ink"
                       />
                     </label>
+                  )}
+                  {c.id === 'charging' && answer?.answer === 'fail' && (
+                    <div className="mt-4">
+                      <ChoiceGroup
+                        legend="Which charger and cable did you test with?"
+                        hint="If you used one you know works, a replacement charger is ruled out. Otherwise, try a known-working one before buying anything."
+                        name="charging-accessory"
+                        value={answer.accessory_check ?? null}
+                        options={accessoryOptions}
+                        onChange={(v) => actions.setAccessoryCheck(c.id, v)}
+                      />
+                    </div>
                   )}
                 </>
               )}

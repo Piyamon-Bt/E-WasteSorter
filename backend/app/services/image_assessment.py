@@ -149,14 +149,18 @@ def follow_up(
     note: str,
     originals: list[PreparedImage],
     extras: list[PreparedImage],
+    prior: list[FollowUpResult] | None = None,
 ) -> FollowUpResult:
+    """Re-checks the current effective observation. `prior` is the earlier follow-up history,
+    sent so the provider knows whether a safety risk was already identified."""
+    prior = prior or []
     if settings.is_mock:
-        return mock_provider.follow_up(observation, response, len(extras))
+        return mock_provider.follow_up(observation, response, len(extras), prior)
     provider = openai_provider.create()
     images = [(f"original {i.view}", i.data) for i in originals] + [
         (f"new photo {n + 1}", i.data) for n, i in enumerate(extras)
     ]
-    parsed = provider.follow_up(assessment_id, device_type, observation, response, note, images)
+    parsed = provider.follow_up(assessment_id, device_type, observation, response, note, images, prior)
     revised = None
     if parsed.outcome == "revised" and parsed.revised_observation is not None:
         data = parsed.revised_observation.model_dump()

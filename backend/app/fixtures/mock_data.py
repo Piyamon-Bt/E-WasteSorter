@@ -142,6 +142,7 @@ PRICES = {
             "front_glass_or_screen": [("repair_quote", "aftermarket", (1800, 2400)), ("part_price", "genuine", (2800, 3200)), ("repair_labor", "not_applicable", (500, 800))],
             "charging_port": [("repair_quote", "unknown", (800, 1200))],
             "battery": [("repair_quote", "unknown", (1200, 1800))],
+            "charger_accessory": [("part_price", "unknown", (350, 600))],
             "display_panel": [("repair_quote", "unknown", (2500, 3500))],
             "back_panel": [("repair_quote", "unknown", (900, 1400))],
         },
@@ -154,6 +155,7 @@ PRICES = {
         "quotes": {
             "hinge": [("repair_quote", "unknown", (1500, 2500))],
             "charging_port": [("repair_quote", "unknown", (1000, 1600))],
+            "charger_accessory": [("part_price", "unknown", (600, 1200))],
             "battery": [("part_price", "aftermarket", (1400, 2000)), ("repair_labor", "not_applicable", (300, 500))],
             "display_panel": [("repair_quote", "unknown", (3500, 5000))],
             "keyboard": [("repair_quote", "unknown", (1500, 2200))],

@@ -67,9 +67,9 @@ def build_report(snap: AssessmentSnapshot, rec: RecommendationResult | None) -> 
         add(f"- Uncertainty: {o.uncertainty} — {o.uncertainty_reason}")
         add(f"- Your review: {review.response if review and review.response else 'not reviewed'}"
             + (f" — “{_cell(review.note)}”" if review and review.note else ""))
-        if review and review.follow_up:
-            f = review.follow_up
-            add(f"- Follow-up ({f.extra_images} extra photo(s), {f.source}): {f.outcome} — {f.explanation}")
+        for n, f in enumerate(review.follow_ups if review else [], start=1):
+            revised = f" → revised to {KIND_LABELS[f.revised_observation.kind]}: {f.revised_observation.part}" if f.revised_observation else ""
+            add(f"- Follow-up {n} ({f.extra_images} extra photo(s), {f.source}): {f.outcome}{revised} — {f.explanation}")
         add(f"- Status used in recommendations: {item.state}")
         add("")
     if snap.physical.unassessable_areas:
@@ -149,7 +149,7 @@ def build_report(snap: AssessmentSnapshot, rec: RecommendationResult | None) -> 
             add("")
             add("Possible repair scenarios (not diagnoses):")
             for s in p.repair_scenarios:
-                add(f"- {s.need}: {s.title}")
+                add(f"- {s.title} — may address: {'; '.join(s.needs)}")
     add("")
 
     # Services
@@ -187,7 +187,13 @@ def build_report(snap: AssessmentSnapshot, rec: RecommendationResult | None) -> 
         for o in rec.options:
             add(f"### {o.title}")
             add(o.summary)
-            add(f"- Gross sale: {_money(o.gross_sale)}; repair cost: {_money(o.repair_cost)}; "
+            add(f"- Financial status: {o.financial_status}"
+                + (f"; comparison basis: {PRICE_TYPE_LABELS[o.sale_basis]}" if o.sale_basis else ""))
+            for c in o.sale_channels:
+                add(f"- Sale channel — {PRICE_TYPE_LABELS[c.price_type]} ({c.device_state.replace('_', ' ')}, "
+                    f"{c.records} record(s)): {_money(c.range)}{' — used for calculation' if c.used_for_calculation else ''}")
+            add(f"- Gross sale: {_money(o.gross_sale)}; repair cost: {_money(o.repair_cost)}"
+                f"{'' if o.repair_cost_complete else ' (incomplete)'}; "
                 f"net proceeds: {_money(o.net_proceeds)}; avoided cost: {_money(o.avoided_cost)}")
             add(f"- {o.financial_note}")
             for x in o.prerequisites:
@@ -200,11 +206,18 @@ def build_report(snap: AssessmentSnapshot, rec: RecommendationResult | None) -> 
         for ranking, title in ((rec.financial_ranking, "Financial value"), (rec.resource_ranking, "Resource use / life extension")):
             add(f"**{title} ranking:** " + (" > ".join(TITLES[a] for a in ranking.order) or "none")
                 + ("" if ranking.complete else " (incomplete)"))
+            if ranking.conditional:
+                add("- Conditional order (incomplete evidence): " + " > ".join(TITLES[a] for a in ranking.conditional))
             for e in ranking.explanation:
                 add(f"- {e}")
             add("")
         if rec.rankings_differ:
             add(rec.rankings_differ)
+            add("")
+        if rec.disposal_guidance:
+            add("**General disposal guidance (not a recommendation):**")
+            for g in rec.disposal_guidance:
+                add(f"- {g}")
             add("")
     add("---")
     add("This report is not a repair quotation, sale offer or safety certification. The assessment was not stored by the app.")

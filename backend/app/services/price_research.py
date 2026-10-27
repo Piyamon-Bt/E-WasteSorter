@@ -33,7 +33,7 @@ def _empty(req: PriceRequest, settings: Settings, status: str, source: str, mode
         retrieved_at=datetime.now(timezone.utc),
         records=[],
         channels=[ChannelStatus(price_type=t, status="not_searched", note="") for t in ALL_TYPES],
-        repair_scenarios=derive_repair_scenarios(req.device_type, req.damaged_parts, req.failed_checks),
+        repair_scenarios=derive_repair_scenarios(req.device_type, req.damaged_parts, req.failed_checks, req.accessory_ruled_out),
         issues=[],
     )
 
@@ -42,7 +42,7 @@ def research(settings: Settings, assessment_id: str, req: PriceRequest, scenario
     req = req.model_copy(update={"country": req.country.upper()})
     source = "simulated" if settings.is_mock else "live"
     model = mock_provider.MOCK_MODEL if settings.is_mock else settings.openai_model
-    scenarios = derive_repair_scenarios(req.device_type, req.damaged_parts, req.failed_checks)
+    scenarios = derive_repair_scenarios(req.device_type, req.damaged_parts, req.failed_checks, req.accessory_ruled_out)
 
     if req.identity.status == "unknown":
         result = _empty(req, settings, "skipped_unknown_identity", source, model)

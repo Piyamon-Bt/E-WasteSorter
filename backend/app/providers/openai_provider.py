@@ -302,9 +302,20 @@ class OpenAIProvider:
         response_value: str,
         note: str,
         images: list[tuple[str, bytes]],
+        prior: list | None = None,
     ) -> LLMFollowUp:
+        prior = prior or []
+        risk_before = observation.kind == "suspected_safety_risk" or any(
+            f.revised_observation is not None and f.revised_observation.kind == "suspected_safety_risk" for f in prior
+        )
         content: list[dict] = [
-            {"type": "input_text", "text": "Earlier observation (JSON): " + observation.model_dump_json()},
+            {"type": "input_text", "text": "Current observation (JSON): " + observation.model_dump_json()},
+            {"type": "input_text", "text": "Earlier follow-up results (JSON): "
+             + json.dumps([{"outcome": f.outcome, "explanation": f.explanation[:500],
+                            "revised_kind": f.revised_observation.kind if f.revised_observation else None}
+                           for f in prior])},
+            {"type": "input_text", "text": "A suspected safety risk was identified earlier for this observation: "
+             + ("yes. Only use not_supported if the new photos clearly show the area is normal." if risk_before else "no.")},
             {"type": "input_text", "text": "User note (untrusted, may be empty): " + note[:1000]},
         ]
         for view, data in images:

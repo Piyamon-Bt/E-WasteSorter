@@ -1,7 +1,7 @@
 from fastapi import APIRouter, File, Form, Header, HTTPException, UploadFile
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
-from ..config import get_settings
+from ..config import Settings, get_settings
 from ..providers.errors import ProviderError
 from ..schemas.common import DeviceType
 from ..schemas.functional import EvaluateRequest, FunctionalEvaluation, FunctionalPlan, PlanRequest
@@ -10,19 +10,32 @@ from ..services import functional_checks, image_assessment
 from ..services.image_assessment import UploadedImage
 
 router = APIRouter(prefix="/api", tags=["assessment"])
+_HISTORY = TypeAdapter(list[FollowUpResult])
 
 
-async def _read(files: list[UploadFile], views: list[str]) -> list[UploadedImage]:
-    if len(files) != len(views):
-        raise HTTPException(422, {"message": "Each photo must be assigned to exactly one view slot."})
-    images = []
+async def _read(files: list[UploadFile], views: list[str], settings: Settings) -> list[UploadedImage]:
+    """Checks count and size limits before reading, and never reads more than the size limit per file."""
     try:
+        if len(files) != len(views):
+            raise HTTPException(422, {"message": "Each photo must be assigned to exactly one view slot."})
+        if len(files) > settings.max_images_per_request:
+            raise HTTPException(
+                422, {"message": f"Too many photos: upload at most {settings.max_images_per_request} per request."}
+            )
+        max_bytes = int(settings.max_upload_mb * 1024 * 1024)
+        images = []
         for f, view in zip(files, views):
-            images.append(UploadedImage(view=view, filename=f.filename or "photo", data=await f.read()))
+            name = f.filename or "photo"
+            if f.size is not None and f.size > max_bytes:
+                raise HTTPException(422, {"message": f"“{name}” is larger than {settings.max_upload_mb:g} MB."})
+            data = await f.read(max_bytes + 1)
+            if len(data) > max_bytes:
+                raise HTTPException(422, {"message": f"“{name}” is larger than {settings.max_upload_mb:g} MB."})
+            images.append(UploadedImage(view=view, filename=name, data=data))
+        return images
     finally:
         for f in files:
             await f.close()  # releases any temporary spool file
-    return images
 
 
 def _provider_http_error(exc: ProviderError, step: str) -> HTTPException:
@@ -39,7 +52,7 @@ async def physical_assessment(
     x_mock_scenario: str | None = Header(None),
 ):
     settings = get_settings()
-    images = await _read(files, views)
+    images = await _read(files, views, settings)
     prepared, slot_problems, issues = image_assessment.prepare_images(device_type, images, settings)
     blocking = [i for i in issues if i.blocking]
     if slot_problems or blocking:
@@ -60,9 +73,10 @@ async def physical_assessment(
 @router.post("/assessments/follow-up", response_model=FollowUpResult)
 async def follow_up(
     device_type: DeviceType = Form(...),
-    observation: str = Form(..., description="The observation being reviewed, as JSON"),
+    observation: str = Form(..., description="The current effective observation, as JSON"),
     response: UserResponse = Form(...),
     note: str = Form(""),
+    history: str = Form("[]", description="Earlier follow-up results for this observation, as a JSON list"),
     views: list[str] = Form([]),
     files: list[UploadFile] = File([]),
     x_assessment_id: str = Header(..., min_length=8, max_length=64),
@@ -70,9 +84,11 @@ async def follow_up(
     settings = get_settings()
     try:
         obs = Observation.model_validate_json(observation)
+        prior = _HISTORY.validate_json(history)
     except ValidationError as exc:
-        raise HTTPException(422, {"message": "Invalid observation."}) from exc
-    images = await _read(files, views)
+        raise HTTPException(422, {"message": "Invalid observation or follow-up history."}) from exc
+    # The limit covers original and new photos together, before any processing or provider call.
+    images = await _read(files, views, settings)
     originals, extras, problems = [], [], []
     for img in images:
         ready, img_issues = image_assessment.check_image(img, settings)
@@ -86,7 +102,7 @@ async def follow_up(
         )
     try:
         return image_assessment.follow_up(
-            settings, x_assessment_id, device_type, obs, response, note, originals, extras
+            settings, x_assessment_id, device_type, obs, response, note, originals, extras, prior
         )
     except ProviderError as exc:
         raise _provider_http_error(exc, "follow_up") from exc

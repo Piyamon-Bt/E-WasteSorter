@@ -68,51 +68,93 @@ CHECK_GUIDANCE = [
 ]
 
 
+RISK = "suspected_safety_risk"
+
+
 @dataclass
 class ResolvedObservation:
-    observation: Observation
+    observation: Observation  # effective observation after follow-up revisions (original id kept)
+    original: Observation
     review: ObservationReview | None
     state: str  # "accepted" | "disputed" | "withdrawn" | "unreviewed"
+    # Index in the follow-up history of the latest event that asserted a safety risk:
+    # -1 = the original observation, None = never a risk.
+    last_risk_event: int | None = None
 
 
 def resolve_observations(observations: list[Observation], reviews: list[ObservationReview]) -> list[ResolvedObservation]:
-    """Applies user reviews and follow-up results without assuming either side is always right."""
+    """Applies user reviews and the whole follow-up history without assuming either side is always right.
+
+    Revisions apply in order, so the effective observation is the latest revision. A later
+    follow-up that is not a revision (upheld, unresolved) keeps the previous effective observation.
+    """
     by_id = {r.observation_id: r for r in reviews}
     resolved = []
     for obs in observations:
         review = by_id.get(obs.id)
-        follow = review.follow_up if review else None
+        history = review.follow_ups if review else []
         current = obs
-        if follow and follow.outcome == "revised" and follow.revised_observation:
-            current = follow.revised_observation
-        if follow and follow.outcome == "not_supported" and follow.extra_images > 0:
+        last_risk = -1 if obs.kind == RISK else None
+        for i, f in enumerate(history):
+            if f.outcome == "revised" and f.revised_observation:
+                # Keep the original id so reviews, photos and reports stay linked.
+                current = f.revised_observation.model_copy(update={"id": obs.id})
+                if current.kind == RISK:
+                    last_risk = i
+        latest = history[-1] if history else None
+        if latest and latest.outcome == "not_supported" and latest.extra_images > 0:
             state = "withdrawn"
         elif review is None or review.response is None:
             state = "unreviewed"
-        elif review.response == "agree" or (follow and follow.outcome in ("upheld", "revised")):
+        elif review.response == "agree" or (latest and latest.outcome in ("upheld", "revised")):
             state = "accepted"
         else:
             state = "disputed"
-        resolved.append(ResolvedObservation(current, review, state))
+        resolved.append(ResolvedObservation(current, obs, review, state, last_risk))
     return resolved
 
 
 def safety_state(observations: list[Observation], reviews: list[ObservationReview]) -> SafetyState:
+    """Blocks power-on and charging while any original or follow-up-identified risk is not cleared.
+
+    Rules:
+    - Once a risk is asserted (originally or by any follow-up revision), it stays in the history.
+      Later results never erase it.
+    - It is cleared only when the most recent follow-up comes after the latest risk assertion and
+      is an explicit "not_supported" outcome based on at least one usable new photo.
+    - Disagreement, "unresolved", "upheld" or a revision away from the risk kind do not clear it.
+    """
     risks = []
     for item in resolve_observations(observations, reviews):
-        original = next(o for o in observations if o.id == item.observation.id)
-        if original.kind != "suspected_safety_risk":
+        if item.last_risk_event is None:
             continue
-        follow = item.review.follow_up if item.review else None
-        new_evidence = bool(follow and follow.extra_images > 0)
-        if new_evidence and (item.state == "withdrawn" or item.observation.kind != "suspected_safety_risk"):
-            status, why = "cleared_after_follow_up", "Follow-up photos did not show the suspected risk. Stay cautious."
+        history = item.review.follow_ups if item.review else []
+        latest_index = len(history) - 1
+        latest = history[-1] if history else None
+        cleared = (
+            latest is not None
+            and latest_index > item.last_risk_event
+            and latest.outcome == "not_supported"
+            and latest.extra_images > 0
+        )
+        found_in_follow_up = item.last_risk_event >= 0
+        if cleared:
+            status, why = "cleared_after_follow_up", "The latest follow-up photos did not show the suspected risk. Stay cautious."
+        elif found_in_follow_up and item.original.kind != RISK and item.observation.kind == RISK:
+            status, why = "identified_in_follow_up", "A follow-up re-check identified a suspected safety risk."
         elif item.review and item.review.response == "agree":
             status, why = "confirmed_by_user", "You agreed with the suspected risk."
         else:
             status = "unresolved"
             why = "Not resolved. Disagreement or uncertainty alone does not clear a safety risk."
-        risks.append(RiskStatus(observation_id=original.id, part=original.part, status=status, explanation=why))
+            if item.observation.kind != RISK:
+                why = ("An earlier re-check identified a suspected safety risk. A later result did not explicitly "
+                       "rule it out with new photos, so it stays unresolved.")
+        part = item.observation.part if item.observation.kind == RISK else item.original.part
+        if found_in_follow_up and item.observation.kind != RISK:
+            risk_obs = history[item.last_risk_event].revised_observation
+            part = risk_obs.part if risk_obs else part
+        risks.append(RiskStatus(observation_id=item.original.id, part=part, status=status, explanation=why))
     blocked = any(r.status != "cleared_after_follow_up" for r in risks)
     return SafetyState(blocked=blocked, risks=risks, guidance=RISK_GUIDANCE if blocked else [])
 
@@ -163,7 +205,8 @@ def evaluate(
                 clarifications.append(
                     f"{c.label} was reported as Pass, which needs the device to be on. Please update the Power on answer."
                 )
-        outcomes.append(CheckOutcome(check_id=c.id, label=c.label, status=status, note=note))
+        accessory = r.accessory_check if r and c.id == "charging" else None
+        outcomes.append(CheckOutcome(check_id=c.id, label=c.label, status=status, note=note, accessory_check=accessory))
 
     status_of = {o.check_id: o.status for o in outcomes}
     if status_of.get("display") == "fail" and status_of.get("touch") == "pass":

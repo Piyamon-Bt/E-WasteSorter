@@ -37,10 +37,15 @@ class ConfirmedIdentity(BaseModel):
 
 
 class RepairScenario(BaseModel):
-    """A possible repair path. Scenarios for one need are alternatives, never a confirmed diagnosis."""
+    """One possible repair intervention, never a confirmed diagnosis.
+
+    `needs` lists every finding this intervention might address. One intervention
+    that appears under several needs is priced once. Different scenarios listed
+    under the same need are alternative causes.
+    """
 
     id: str
-    need: str
+    needs: list[str]
     title: str
     description: str
 
@@ -78,6 +83,8 @@ class PriceRequest(BaseModel):
     condition_summary: list[str] = []
     damaged_parts: list[str] = []
     failed_checks: list[str] = []
+    # True when charging failed with a charger the user knows works (accessory ruled out).
+    accessory_ruled_out: bool = False
 
 
 class PriceResearch(BaseModel):

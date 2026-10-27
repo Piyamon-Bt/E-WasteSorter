@@ -1,4 +1,5 @@
 import type {
+  AccessoryCheck,
   CheckAnswer,
   ConfirmedIdentity,
   DeviceType,
@@ -27,6 +28,12 @@ export interface LocationState {
   longitude: number | null
 }
 
+export interface CheckAnswerDraft {
+  answer: CheckAnswer | null
+  note: string
+  accessory_check?: AccessoryCheck | null
+}
+
 export interface ResearchState {
   status: AsyncStatus
   prices: PriceResearch | null
@@ -43,10 +50,11 @@ export interface AssessmentState {
   photoProblems: { slotProblems: string[]; imageIssues: ImageQualityIssue[] }
   analysis: Remote<PhysicalAssessment>
   reviews: Record<string, ReviewDraft>
-  followUps: Record<string, FollowUpResult>
+  /** Follow-up history per observation, oldest first. Never shortened by a later result. */
+  followUps: Record<string, FollowUpResult[]>
   reviewConfirmed: boolean
   plan: Remote<FunctionalPlan>
-  checkAnswers: Record<string, { answer: CheckAnswer | null; note: string }>
+  checkAnswers: Record<string, CheckAnswerDraft>
   functional: Remote<FunctionalEvaluation>
   identity: ConfirmedIdentity | null
   location: LocationState | null
@@ -96,6 +104,7 @@ export const emptyReview: ReviewDraft = {
   extraPhotos: [],
   followUpStatus: 'idle',
   followUpError: null,
+  followUpSeq: 0,
 }
 
 export type Action =
@@ -111,13 +120,14 @@ export type Action =
   | { type: 'review/addExtra'; id: string; photos: SlotPhoto[] }
   | { type: 'review/removeExtra'; id: string; photoId: string }
   | { type: 'followUp/start'; id: string }
-  | { type: 'followUp/success'; key: number; id: string; result: FollowUpResult }
-  | { type: 'followUp/failure'; key: number; id: string; error: string }
+  | { type: 'followUp/success'; key: number; id: string; seq: number; result: FollowUpResult }
+  | { type: 'followUp/failure'; key: number; id: string; seq: number; error: string }
   | { type: 'plan/start' }
   | { type: 'plan/success'; key: number; plan: FunctionalPlan }
   | { type: 'plan/failure'; key: number; error: string }
   | { type: 'checks/answer'; checkId: string; answer: CheckAnswer }
   | { type: 'checks/note'; checkId: string; note: string }
+  | { type: 'checks/accessory'; checkId: string; accessory: AccessoryCheck }
   | { type: 'functional/start' }
   | { type: 'functional/success'; key: number; result: FunctionalEvaluation }
   | { type: 'functional/failure'; key: number; error: string }
@@ -208,15 +218,20 @@ export function assessmentReducer(state: AssessmentState, action: Action): Asses
       const current = state.reviews[action.id] ?? emptyReview
       return updateReview(state, action.id, { extraPhotos: current.extraPhotos.filter((p) => p.id !== action.photoId) })
     }
-    case 'followUp/start':
-      return updateReview(invalidate(state, 'review'), action.id, { followUpStatus: 'processing', followUpError: null })
+    case 'followUp/start': {
+      const seq = (state.reviews[action.id] ?? emptyReview).followUpSeq + 1
+      return updateReview(invalidate(state, 'review'), action.id, { followUpStatus: 'processing', followUpError: null, followUpSeq: seq })
+    }
     case 'followUp/success': {
-      if (action.key !== state.analysisKey) return state
+      // Stale or out-of-order responses never overwrite newer evidence.
+      if (action.key !== state.analysisKey || action.seq !== state.reviews[action.id]?.followUpSeq) return state
       const next = updateReview(invalidate(state, 'review'), action.id, { followUpStatus: 'complete', extraPhotos: [] })
-      return { ...next, followUps: { ...next.followUps, [action.id]: action.result } }
+      const history = [...(state.followUps[action.id] ?? []), action.result]
+      return { ...next, followUps: { ...next.followUps, [action.id]: history } }
     }
     case 'followUp/failure':
-      if (action.key !== state.analysisKey) return state
+      // A failed re-check keeps the whole history, including any earlier risk.
+      if (action.key !== state.analysisKey || action.seq !== state.reviews[action.id]?.followUpSeq) return state
       return updateReview(state, action.id, { followUpStatus: 'failed', followUpError: action.error })
 
     case 'plan/start':
@@ -240,6 +255,13 @@ export function assessmentReducer(state: AssessmentState, action: Action): Asses
       return {
         ...invalidate(state, 'functional'),
         checkAnswers: { ...state.checkAnswers, [action.checkId]: { ...current, note: action.note } },
+      }
+    }
+    case 'checks/accessory': {
+      const current = state.checkAnswers[action.checkId] ?? { answer: null, note: '' }
+      return {
+        ...invalidate(state, 'functional'),
+        checkAnswers: { ...state.checkAnswers, [action.checkId]: { ...current, accessory_check: action.accessory } },
       }
     }
     case 'functional/start':

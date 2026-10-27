@@ -39,14 +39,14 @@ def test_disagreement_alone_keeps_risk_blocked():
 def test_follow_up_without_new_photos_cannot_clear_risk():
     phys = risk_assessment()
     rid = risk_id(phys)
-    reviews = [ObservationReview(observation_id=rid, response="disagree", follow_up=follow(rid, "not_supported", 0))]
+    reviews = [ObservationReview(observation_id=rid, response="disagree", follow_ups=[follow(rid, "not_supported", 0)])]
     assert fc.safety_state(phys.observations, reviews).blocked
 
 
 def test_follow_up_with_new_photos_can_clear_risk():
     phys = risk_assessment()
     rid = risk_id(phys)
-    reviews = [ObservationReview(observation_id=rid, response="disagree", follow_up=follow(rid, "not_supported", 2))]
+    reviews = [ObservationReview(observation_id=rid, response="disagree", follow_ups=[follow(rid, "not_supported", 2)])]
     state = fc.safety_state(phys.observations, reviews)
     assert not state.blocked
     assert state.risks[0].status == "cleared_after_follow_up"

@@ -1,6 +1,6 @@
 # E-waste Sorter (MVP prototype)
 
-A localhost web prototype that assesses **one laptop or mobile phone** from photos, guides basic functional checks, and compares **Reuse, Resell as-is, Repair then reuse, Repair then resell and Recycle** using local price and service evidence. It produces two separate rankings, **financial value** and **resource use / life extension**, plus a downloadable Markdown report.
+A localhost web prototype that assesses **one laptop or mobile phone** from photos, guides basic functional checks, and compares **Reuse, Resell as-is, Repair then reuse and Repair then resell** using local price and service evidence, and gives separate general disposal and recycling guidance. It produces two separate rankings, **financial value** and **resource use / life extension**, plus a downloadable Markdown report.
 
 It runs in two modes:
 

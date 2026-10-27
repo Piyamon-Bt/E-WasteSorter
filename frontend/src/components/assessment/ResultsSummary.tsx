@@ -11,6 +11,7 @@ import {
   priceTypeLabels,
   serviceCategoryLabels,
 } from '../../content/labels'
+import { effectiveObservation, hasOpenRisk, isWithdrawn } from '../../lib/observations'
 import { useAssessment } from '../../state/AssessmentContext'
 import { useNavigation } from '../../state/Navigation'
 import type { ActionOption, ProviderIssue, Ranking } from '../../types/api'
@@ -47,12 +48,38 @@ function Progress({ label, done }: { label: string; done: boolean }) {
   )
 }
 
+const financialStatusLabels = {
+  complete: 'Evidence complete',
+  conditional: 'Conditional estimate',
+  insufficient: 'Insufficient price data',
+} as const
+
 function OptionCard({ option }: { option: ActionOption }) {
   const isSale = option.action === 'resell_as_is' || option.action === 'repair_then_resell'
   return (
     <li className="rounded-lg border border-line p-5 print-break-avoid">
-      <h4 className="text-[17px] font-medium text-ink">{option.title}</h4>
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <h4 className="text-[17px] font-medium text-ink">{option.title}</h4>
+        <span className="rounded-full border border-line px-2.5 py-0.5 text-[12px] text-muted">
+          {financialStatusLabels[option.financial_status]}
+        </span>
+      </div>
       <p className="mt-1 text-[15px] text-ink">{option.summary}</p>
+      {option.sale_channels.length > 0 && (
+        <div className="mt-3">
+          <p className="text-[13px] tracking-[0.06em] text-muted uppercase">Sale channels (kept separate)</p>
+          <ul className="mt-1 space-y-0.5 text-[14px] text-ink">
+            {option.sale_channels.map((c) => (
+              <li key={c.price_type + c.device_state}>
+                {priceTypeLabels[c.price_type]}, {c.device_state.replaceAll('_', ' ')}: {formatMoney(c.range)}{' '}
+                <span className="text-muted">
+                  ({c.records} record{c.records === 1 ? '' : 's'}){c.used_for_calculation ? ' · used below' : ''}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-[14px]">
         {isSale && (
           <>
@@ -63,7 +90,10 @@ function OptionCard({ option }: { option: ActionOption }) {
         {option.action.startsWith('repair') && (
           <>
             <dt className="text-muted">Repair cost</dt>
-            <dd className="text-ink">{formatMoney(option.repair_cost)}</dd>
+            <dd className="text-ink">
+              {formatMoney(option.repair_cost)}
+              {option.repair_cost && !option.repair_cost_complete && <span className="text-muted"> (incomplete)</span>}
+            </dd>
           </>
         )}
         {isSale ? (
@@ -110,7 +140,19 @@ function RankingList({ title, ranking }: { title: string; ranking: Ranking }) {
           ))}
         </ol>
       ) : (
-        <p className="mt-2 text-[15px] text-muted">Not enough price evidence to rank.</p>
+        <p className="mt-2 text-[15px] text-muted">
+          {ranking.conditional.length ? 'No definitive ranking: the evidence is incomplete.' : 'Not enough price evidence to rank.'}
+        </p>
+      )}
+      {ranking.conditional.length > 0 && (
+        <div className="mt-2">
+          <p className="text-[14px] text-muted">Conditional (incomplete evidence):</p>
+          <ol className="list-decimal space-y-1 pl-5 text-[15px] text-ink">
+            {ranking.conditional.map((a) => (
+              <li key={a}>{actionLabels[a]}</li>
+            ))}
+          </ol>
+        </div>
       )}
       {!ranking.complete && <p className="mt-2 text-[14px] text-muted">Incomplete ranking.</p>}
       <ul className="mt-2 space-y-1 text-[13px] text-muted">
@@ -180,16 +222,18 @@ export function ResultsSummary() {
         <Heading>Physical findings</Heading>
         <ul className="space-y-3">
           {observations.map((o) => {
-            const f = followUps[o.id]
-            const shown = f?.revised_observation ?? o
+            const history = followUps[o.id] ?? []
+            const f = history[history.length - 1]
+            const shown = effectiveObservation(o, history)
             const response = reviews[o.id]?.response
             return (
-              <li key={o.id} className={`text-[15px] ${f?.outcome === 'not_supported' ? 'text-muted line-through' : 'text-ink'}`}>
+              <li key={o.id} className={`text-[15px] ${isWithdrawn(history) ? 'text-muted line-through' : 'text-ink'}`}>
                 <span className="font-medium">{kindLabels[shown.kind]}:</span> {shown.part} — {shown.description}{' '}
                 <span className="text-[13px] text-muted">
                   ({shown.views.map((v) => viewLabel(state.deviceType, v)).join(', ') || 'no photo'}; uncertainty {shown.uncertainty}
                   {response ? `; you: ${response}` : ''}
-                  {f ? `; re-check: ${f.outcome.replace('_', ' ')}` : ''})
+                  {f ? `; latest re-check: ${f.outcome.replace('_', ' ')}` : ''}
+                  {hasOpenRisk(o, history) && shown.kind !== 'suspected_safety_risk' ? '; earlier suspected risk unresolved' : ''})
                 </span>
               </li>
             )
@@ -303,8 +347,8 @@ export function ResultsSummary() {
                 <p className="text-[15px] font-medium text-ink">Possible repair scenarios (not diagnoses)</p>
                 <ul className="mt-1 space-y-1 text-[14px] text-ink">
                   {prices.repair_scenarios.map((s) => (
-                    <li key={s.need + s.id}>
-                      {s.need}: {s.title}
+                    <li key={s.id}>
+                      {s.title} <span className="text-muted">— may address: {s.needs.join('; ')}</span>
                     </li>
                   ))}
                 </ul>
@@ -384,6 +428,17 @@ export function ResultsSummary() {
               <RankingList title="Resource use / life extension" ranking={recommendation.resource_ranking} />
             </div>
             {recommendation.rankings_differ && <p className="text-[15px] text-ink">{recommendation.rankings_differ}</p>}
+            {recommendation.disposal_guidance.length > 0 && (
+              <div>
+                <p className="text-[15px] font-medium text-ink">General disposal guidance</p>
+                <p className="text-[13px] text-muted">Not a recommendation; shown for when you decide a device has reached end of life.</p>
+                <ul className="mt-1 space-y-1 text-[14px] text-ink">
+                  {recommendation.disposal_guidance.map((g) => (
+                    <li key={g}>– {g}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
             <ul className="space-y-1 text-[13px] text-muted">
               {recommendation.disclaimers.map((d) => (
                 <li key={d}>{d}</li>

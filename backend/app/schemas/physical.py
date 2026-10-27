@@ -90,4 +90,10 @@ class ObservationReview(BaseModel):
     observation_id: str
     response: UserResponse | None = None
     note: str = ""
-    follow_up: FollowUpResult | None = None
+    # Every follow-up result for this observation, oldest first. Kept so a risk found by an
+    # earlier re-check can never be lost when a later re-check returns a different result.
+    follow_ups: list[FollowUpResult] = []
+
+    @property
+    def latest_follow_up(self) -> FollowUpResult | None:
+        return self.follow_ups[-1] if self.follow_ups else None

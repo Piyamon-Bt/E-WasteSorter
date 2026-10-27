@@ -90,7 +90,8 @@ export interface ObservationReview {
   observation_id: string
   response: UserResponse | null
   note: string
-  follow_up: FollowUpResult | null
+  /** Every follow-up result for this observation, oldest first. */
+  follow_ups: FollowUpResult[]
 }
 
 // ---- Functional checks ----
@@ -101,7 +102,7 @@ export type CheckStatus = CheckAnswer | 'not_answered' | 'unavailable_power_fail
 export interface RiskStatus {
   observation_id: string
   part: string
-  status: 'confirmed_by_user' | 'unresolved' | 'cleared_after_follow_up'
+  status: 'confirmed_by_user' | 'unresolved' | 'identified_in_follow_up' | 'cleared_after_follow_up'
   explanation: string
 }
 
@@ -125,10 +126,14 @@ export interface FunctionalPlan {
   guidance: string[]
 }
 
+/** Charging check only: whether the test used a charger and cable known to work. */
+export type AccessoryCheck = 'known_working' | 'unverified'
+
 export interface CheckResponse {
   check_id: string
   answer: CheckAnswer | null
   note: string
+  accessory_check?: AccessoryCheck | null
 }
 
 export interface CheckOutcome {
@@ -136,6 +141,7 @@ export interface CheckOutcome {
   label: string
   status: CheckStatus
   note: string
+  accessory_check: AccessoryCheck | null
 }
 
 export interface FunctionalEvaluation {
@@ -186,9 +192,10 @@ export interface PriceRecord {
   simulated: boolean
 }
 
+/** One repair intervention; `needs` lists every finding it might address (priced once). */
 export interface RepairScenario {
   id: string
-  need: string
+  needs: string[]
   title: string
   description: string
 }
@@ -244,6 +251,15 @@ export interface LocationChoice {
 
 export type Action = 'reuse' | 'resell_as_is' | 'repair_then_reuse' | 'repair_then_resell' | 'recycle'
 
+/** One sale channel for one device condition. Channels are never pooled. */
+export interface SaleChannelEstimate {
+  price_type: PriceType
+  device_state: string
+  range: Money
+  records: number
+  used_for_calculation: boolean
+}
+
 export interface ActionOption {
   action: Action
   title: string
@@ -251,16 +267,21 @@ export interface ActionOption {
   prerequisites: string[]
   tradeoffs: string[]
   uncertainty: string[]
+  sale_channels: SaleChannelEstimate[]
+  sale_basis: PriceType | null
   gross_sale: Money | null
   repair_cost: Money | null
+  repair_cost_complete: boolean
   net_proceeds: Money | null
   avoided_cost: Money | null
+  financial_status: 'complete' | 'conditional' | 'insufficient'
   financial_note: string
 }
 
 export interface Ranking {
   basis: 'financial_value' | 'resource_use'
   order: Action[]
+  conditional: Action[]
   unranked: Action[]
   explanation: string[]
   complete: boolean
@@ -274,6 +295,7 @@ export interface RecommendationResult {
   conditional_findings: string[]
   rankings_differ: string | null
   disclaimers: string[]
+  disposal_guidance: string[]
 }
 
 export interface AssessmentSnapshot {

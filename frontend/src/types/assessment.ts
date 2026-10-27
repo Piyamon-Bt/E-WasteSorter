@@ -24,4 +24,6 @@ export interface ReviewDraft {
   extraPhotos: SlotPhoto[]
   followUpStatus: AsyncStatus
   followUpError: string | null
+  /** Increases with every re-check request; only the latest request's response is applied. */
+  followUpSeq: number
 }

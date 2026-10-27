@@ -1,5 +1,6 @@
 import { DETAIL_SLOT, deviceById } from '../content/devices'
-import type { AssessmentSnapshot, ObservationReview } from '../types/api'
+import { effectiveObservation, hasOpenRisk, isWithdrawn } from '../lib/observations'
+import type { AssessmentSnapshot, Observation, ObservationReview } from '../types/api'
 import type { SectionId } from '../types/assessment'
 import type { AssessmentState } from './assessmentReducer'
 
@@ -22,8 +23,23 @@ export function selectReviews(s: AssessmentState): ObservationReview[] {
     observation_id: o.id,
     response: s.reviews[o.id]?.response ?? null,
     note: s.reviews[o.id]?.note ?? '',
-    follow_up: s.followUps[o.id] ?? null,
+    follow_ups: s.followUps[o.id] ?? [],
   }))
+}
+
+export interface EffectiveObservation {
+  original: Observation
+  current: Observation
+  openRisk: boolean
+  withdrawn: boolean
+}
+
+/** Observations after their follow-up history, with any risk that is still open. */
+export function selectEffectiveObservations(s: AssessmentState): EffectiveObservation[] {
+  return (s.analysis.data?.observations ?? []).map((o) => {
+    const history = s.followUps[o.id] ?? []
+    return { original: o, current: effectiveObservation(o, history), openRisk: hasOpenRisk(o, history), withdrawn: isWithdrawn(history) }
+  })
 }
 
 /** Observations the user must respond to before continuing. */

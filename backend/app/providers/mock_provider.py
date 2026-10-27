@@ -66,9 +66,14 @@ def assess_physical(device_type: str, views: list[str], scenario: str) -> Physic
     )
 
 
-def follow_up(observation: Observation, response: str, extra_images: int) -> FollowUpResult:
-    """Simulated follow-up. A suspected risk always stays unresolved in mock mode."""
-    if observation.kind == "suspected_safety_risk":
+def follow_up(
+    observation: Observation, response: str, extra_images: int, prior: list[FollowUpResult] | None = None
+) -> FollowUpResult:
+    """Simulated follow-up. A current or earlier suspected risk always stays unresolved in mock mode."""
+    risk_before = any(
+        f.revised_observation is not None and f.revised_observation.kind == "suspected_safety_risk" for f in prior or []
+    )
+    if observation.kind == "suspected_safety_risk" or risk_before:
         outcome = "unresolved"
         explanation = (
             "Simulated review: the additional evidence does not rule out battery swelling. "
@@ -163,7 +168,7 @@ def research_prices(req: PriceRequest, scenarios: list[RepairScenario], scenario
         )
         for t in ("asking_price", "completed_sale", "buyback_offer", "part_price", "repair_labor", "repair_quote")
     ]
-    missing = [s.title for s in scenarios if s.id not in p["quotes"] and s.id != "charger_accessory"]
+    missing = [s.title for s in scenarios if s.id not in p["quotes"]]
     if missing:
         base.notes.append("Insufficient repair price data for: " + ", ".join(missing) + ".")
     return base

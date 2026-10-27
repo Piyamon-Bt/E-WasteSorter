@@ -2,11 +2,34 @@
 
 Transparent rules and arithmetic only. AI output is never used as a numeric
 input here; numbers come from price records with provenance.
+
+Financial rules (see docs/ARCHITECTURE.md):
+- One repair intervention that may address several findings is priced once.
+- Repair cost is "complete" only when every plausible combination of causes is
+  priced with a combined quote or part + labor. Otherwise it is conditional.
+- Sale channels (completed sales, buyback offers, asking prices) are never pooled.
+  Sale options are compared on one common channel, chosen in that order.
+  Asking prices are not proceeds, so an asking-price basis is conditional.
+- An option is "complete" only when the evidence behind it is sufficient: functional checks
+  complete without contradictions, no disputed damage, and (for repairs) confirmed causes.
+  Otherwise it stays conditional and its assumptions are listed.
+- A replacement charger/cable is priced only from accessory evidence, never assumed free.
+- Recycle is not offered as a ranked option: this MVP cannot establish end-of-life evidence.
+  "Repair may not be worthwhile" is reported as an economic finding; disposal guidance is separate.
 """
+
+import itertools
+from dataclasses import dataclass, field
 
 from ..schemas.common import Money
 from ..schemas.market import PriceRecord, RepairScenario
-from ..schemas.recommendation import ActionOption, AssessmentSnapshot, Ranking, RecommendationResult
+from ..schemas.recommendation import (
+    ActionOption,
+    AssessmentSnapshot,
+    Ranking,
+    RecommendationResult,
+    SaleChannelEstimate,
+)
 from .functional_checks import resolve_observations, safety_state
 
 # ---- Repair scenarios ----
@@ -21,7 +44,7 @@ SCENARIOS = {
     "touchpad": ("Touchpad repair", "Repair or replace the touchpad."),
     "battery": ("Battery replacement", "Replace the battery."),
     "charging_port": ("Charging port repair", "Repair or replace the charging port."),
-    "charger_accessory": ("Charger or cable problem", "Try another charger and cable first; this may need no repair."),
+    "charger_accessory": ("Replacement charger or cable", "Buy a replacement charger or cable if the original accessory is the cause."),
     "board_level": ("Internal board repair", "Board-level diagnosis and repair by a technician."),
     "speaker": ("Speaker repair", "Repair or replace the speaker."),
     "camera_or_microphone": ("Camera or microphone repair", "Repair or replace the camera or microphone."),
@@ -54,13 +77,21 @@ def _part_scenario(device_type: str, part: str) -> str:
     return "casing"
 
 
-def derive_repair_scenarios(device_type: str, damaged_parts: list[str], failed_checks: list[str]) -> list[RepairScenario]:
+def derive_repair_scenarios(
+    device_type: str, damaged_parts: list[str], failed_checks: list[str], accessory_ruled_out: bool = False
+) -> list[RepairScenario]:
+    """One scenario per intervention; `needs` lists every finding it might address.
+
+    `accessory_ruled_out`: charging failed with a charger the user knows works, so a replacement
+    charger or cable is not a plausible cause.
+    """
     result: dict[str, RepairScenario] = {}
 
     def add(need: str, scenario_id: str):
         title, desc = SCENARIOS[scenario_id]
-        key = f"{need}:{scenario_id}"
-        result.setdefault(key, RepairScenario(id=scenario_id, need=need, title=title, description=desc))
+        scenario = result.setdefault(scenario_id, RepairScenario(id=scenario_id, needs=[], title=title, description=desc))
+        if need not in scenario.needs:
+            scenario.needs.append(need)
 
     for part in damaged_parts:
         add(f"Visible damage: {part}", _part_scenario(device_type, part))
@@ -68,11 +99,17 @@ def derive_repair_scenarios(device_type: str, damaged_parts: list[str], failed_c
         if check in CHECK_NEEDS:
             need, alternatives = CHECK_NEEDS[check]
             for s in alternatives:
+                if s == ACCESSORY and accessory_ruled_out:
+                    continue
                 add(need, s)
     return list(result.values())
 
 
 # ---- Money helpers ----
+
+# Only records that match the device closely enough are used in calculations.
+CALC_MATCH = ("exact", "close")
+ACCESSORY = "charger_accessory"  # an accessory purchase: its price is the full cost, no labor needed
 
 
 def _span(records: list[PriceRecord], currency: str) -> Money | None:
@@ -98,58 +135,140 @@ def _money_text(m: Money | None) -> str:
     return f"{m.currency} {m.min:,.0f}–{m.max:,.0f}" if m else "insufficient data"
 
 
-def scenario_cost(records: list[PriceRecord], scenario_id: str, currency: str) -> tuple[Money | None, list[str]]:
-    """Combined quote if available, else part + labor. Never part + combined quote (no double counting)."""
-    rel = [r for r in records if r.scenario_id == scenario_id]
-    quotes = [r for r in rel if r.price_type == "repair_quote"]
+# ---- Repair cost ----
+
+
+def scenario_cost(records: list[PriceRecord], scenario_id: str, currency: str) -> tuple[Money | None, bool, list[str]]:
+    """Cost of one intervention: (range, partial, notes).
+
+    Per part quality: a combined repair quote if available, else part price + labor.
+    Part and combined quote are never added together. Different part qualities are
+    alternatives and are named in the notes. A part price without labor is partial.
+    """
+    rel = [r for r in records if r.scenario_id == scenario_id and r.match_level in CALC_MATCH]
+    labor = _span([r for r in rel if r.price_type == "repair_labor"], currency)
+    qualities = sorted({r.part_quality for r in rel if r.price_type in ("repair_quote", "part_price")})
+    costs: list[tuple[str, Money, str]] = []
+    partial = False
+    for q in qualities:
+        quotes = [r for r in rel if r.price_type == "repair_quote" and r.part_quality == q]
+        parts = [r for r in rel if r.price_type == "part_price" and r.part_quality == q]
+        if quotes:
+            costs.append((q, _span(quotes, currency), "repair quote"))
+        elif parts and scenario_id == ACCESSORY:
+            costs.append((q, _span(parts, currency), "accessory purchase"))
+        elif parts and labor:
+            costs.append((q, _add(_span(parts, currency), labor), "part + labor"))
+        elif parts:
+            partial = True
+            costs.append((q, _span(parts, currency), "part only, labor not included"))
+    if not costs:
+        return None, False, []
+    cost = Money(min=min(c.min for _, c, _ in costs), max=max(c.max for _, c, _ in costs), currency=currency)
     notes = []
-    if quotes:
-        cost = _span(quotes, currency)
-    else:
-        parts = [r for r in rel if r.price_type == "part_price"]
-        labor = [r for r in rel if r.price_type == "repair_labor"]
-        if not parts:
-            return None, notes
-        cost = _span(parts, currency)
-        if labor:
-            cost = _add(cost, _span(labor, currency))
-        else:
-            notes.append("labor not included")
-    qualities = {r.part_quality for r in rel if r.part_quality in ("genuine", "aftermarket")}
-    if len(qualities) > 1:
-        notes.append("range spans genuine and aftermarket parts")
-    return cost, notes
+    if len(costs) > 1:
+        notes.append("alternatives by part quality: " + "; ".join(f"{q} ({how}) {_money_text(c)}" for q, c, how in costs))
+    elif costs[0][2] not in ("repair quote", "accessory purchase"):
+        notes.append(costs[0][2])
+    return cost, partial, notes
 
 
-def repair_cost(
-    scenarios: list[RepairScenario], records: list[PriceRecord], currency: str
-) -> tuple[Money | None, list[str]]:
-    """Sums the cost of each need. Alternatives within one need form a range."""
-    needs: dict[str, list[RepairScenario]] = {}
+@dataclass
+class RepairCostEstimate:
+    cost: Money | None  # range across the fully priced combinations of causes
+    complete: bool  # every combination priced with full (non-partial) costs
+    notes: list[str] = field(default_factory=list)
+
+
+def repair_cost(scenarios: list[RepairScenario], records: list[PriceRecord], currency: str) -> RepairCostEstimate:
+    """Range over every combination of one cause per need, counting a shared intervention once."""
+    if not scenarios:
+        return RepairCostEstimate(None, True)
+    needs: dict[str, list[str]] = {}
     for s in scenarios:
-        needs.setdefault(s.need, []).append(s)
-    total: Money | None = Money(min=0, max=0, currency=currency)
-    notes: list[str] = []
-    for need, alternatives in needs.items():
-        known = []
-        for s in alternatives:
-            if s.id == "charger_accessory":
-                continue
-            cost, cost_notes = scenario_cost(records, s.id, currency)
-            if cost is None:
-                notes.append(f"{need}: no price evidence for “{s.title}”.")
-            else:
-                known.append(cost)
-                notes.extend(f"{s.title}: {n}" for n in cost_notes)
-        if not known:
-            total = None
-            notes.append(f"{need}: repair cost unknown.")
+        for need in s.needs:
+            needs.setdefault(need, []).append(s.id)
+    # No scenario is assumed free: an unpriced accessory stays unknown.
+    priced = {s.id: scenario_cost(records, s.id, currency) for s in scenarios}
+
+    lows, highs = [], []
+    unpriced = partial = False
+    for combo in itertools.product(*needs.values()):
+        chosen = set(combo)  # a shared intervention is paid once
+        if any(priced[s][0] is None for s in chosen):
+            unpriced = True
             continue
-        if total is not None:
-            total = _add(total, Money(min=min(k.min for k in known), max=max(k.max for k in known), currency=currency))
-        if len(alternatives) > 1:
-            notes.append(f"{need}: cost depends on which of {len(alternatives)} possible causes applies.")
-    return total, notes
+        lows.append(sum(priced[s][0].min for s in chosen))
+        highs.append(sum(priced[s][0].max for s in chosen))
+        partial = partial or any(priced[s][1] for s in chosen)
+    cost = Money(min=min(lows), max=max(highs), currency=currency) if lows else None
+
+    notes: list[str] = []
+    for s in scenarios:
+        money, is_partial, s_notes = priced[s.id]
+        if money is None:
+            notes.append(f"No price evidence for “{s.title}” (possible cause of: {', '.join(s.needs)}).")
+        elif is_partial:
+            notes.append(f"{s.title}: part price only, labor not included — partial cost.")
+        notes.extend(f"{s.title}: {n}" for n in s_notes if not (is_partial and n.startswith("part only")))
+        if len(s.needs) > 1:
+            notes.append(
+                f"{s.title} may address {' and '.join(s.needs)}; it is counted once. "
+                "It may not fix every finding if the causes differ."
+            )
+    for need, ids in needs.items():
+        if len(ids) > 1:
+            notes.append(f"{need}: cost depends on which of {len(ids)} possible causes applies.")
+    if cost is None:
+        notes.append("Repair cost unknown: no fully priced combination of repairs.")
+    elif unpriced:
+        notes.append("Range covers only the priced combinations of causes; the real cost could be higher.")
+    if partial:
+        notes.append("Some costs are partial (labor missing), so the repair cost is incomplete.")
+    return RepairCostEstimate(cost, cost is not None and not unpriced and not partial, notes)
+
+
+def unconfirmed_causes(scenarios: list[RepairScenario]) -> list[str]:
+    """Needs with more than one possible cause: the actual fault is not confirmed."""
+    counts: dict[str, int] = {}
+    for s in scenarios:
+        for need in s.needs:
+            counts[need] = counts.get(need, 0) + 1
+    return [need for need, n in counts.items() if n > 1]
+
+
+# ---- Sale channels ----
+
+# Comparison basis, most reliable first: evidenced sales, then published offers, then asking prices.
+CHANNEL_PRIORITY = ("completed_sale", "buyback_offer", "asking_price")
+CHANNEL_LABELS = {"completed_sale": "completed sales", "buyback_offer": "buyback offers", "asking_price": "asking prices"}
+
+
+def channel_estimates(records: list[PriceRecord], state: str, currency: str) -> list[SaleChannelEstimate]:
+    """One range per channel for exactly this device condition. Channels are never merged."""
+    out = []
+    for t in CHANNEL_PRIORITY:
+        recs = [r for r in records if r.price_type == t and r.device_state == state and r.match_level in CALC_MATCH]
+        if recs:
+            out.append(SaleChannelEstimate(price_type=t, device_state=state, range=_span(recs, currency),
+                                           records=len(recs), used_for_calculation=False))
+    return out
+
+
+def common_basis(channel_sets: list[list[SaleChannelEstimate]]) -> str | None:
+    """The most reliable channel available for every sale option being compared."""
+    for t in CHANNEL_PRIORITY:
+        if channel_sets and all(any(c.price_type == t for c in cs) for cs in channel_sets):
+            return t
+    return None
+
+
+def pick(channels: list[SaleChannelEstimate], basis: str | None) -> SaleChannelEstimate | None:
+    """Marks and returns the channel used: the common basis, or this option's own best channel."""
+    chosen = next((c for c in channels if c.price_type == basis), None) if basis else (channels[0] if channels else None)
+    if chosen:
+        chosen.used_for_calculation = True
+    return chosen
 
 
 # ---- Recommendation ----
@@ -162,7 +281,15 @@ TITLES = {
     "recycle": "Recycle",
 }
 RESOURCE_ORDER = ["reuse", "repair_then_reuse", "repair_then_resell", "resell_as_is", "recycle"]
-SALE_TYPES = ("completed_sale", "asking_price", "buyback_offer")
+DISPOSAL_GUIDANCE = [
+    "If you later decide the device has reached end of life, use a certified e-waste collection point or a "
+    "manufacturer or retailer take-back programme. Do not put it in household waste.",
+    "Back up and erase your data, sign out of accounts and remove SIM or memory cards first where possible.",
+]
+BATTERY_GUIDANCE = (
+    "With a suspected battery issue: do not charge it, keep it away from heat, and tell the collection point or "
+    "repairer about the battery before handing it over."
+)
 
 
 def recommend(snap: AssessmentSnapshot) -> RecommendationResult:
@@ -191,94 +318,170 @@ def recommend(snap: AssessmentSnapshot) -> RecommendationResult:
     elif not snap.identity.evidence_verified:
         findings.append("Prices assume the model you selected. It was not verified from the photos.")
 
-    # Prices
+    # Prices (one currency only)
     prices = snap.prices
     records = prices.records if prices else []
     currency = records[0].currency if records else ""
     records = [r for r in records if r.currency == currency]
-    scenarios = derive_repair_scenarios(snap.device_type, [o.part for o in accepted_damage], failed)
-    cost, cost_notes = repair_cost(scenarios, records, currency) if scenarios and records else (None, [])
-    if scenarios and not records:
-        cost_notes = ["No repair price evidence available."]
+    if any(r.match_level == "indicative" for r in records):
+        findings.append("Indicative prices for nearby models are listed as evidence but not used in calculations.")
+    charging = next((o for o in func.outcomes if o.check_id == "charging"), None) if func else None
+    accessory_ruled_out = bool(charging and charging.accessory_check == "known_working")
+    scenarios = derive_repair_scenarios(snap.device_type, [o.part for o in accepted_damage], failed, accessory_ruled_out)
+
+    # Evidence gaps that keep financial estimates conditional (never only a disclaimer).
+    condition_gaps: list[str] = []
+    if func is None:
+        condition_gaps.append("no functional checks were recorded")
+    elif func.clarifications:
+        condition_gaps.append("functional answers contradict each other")
+    elif not func.complete:
+        condition_gaps.append("some functional checks are unknown or unanswered")
+    if disputed_damage:
+        condition_gaps.append("disputed damage (" + ", ".join(o.part for o in disputed_damage) + ") could change costs and value")
+    repair_gaps = condition_gaps + [f"the cause of “{n}” is not confirmed" for n in unconfirmed_causes(scenarios)]
+    estimate = repair_cost(scenarios, records, currency) if records else RepairCostEstimate(None, not scenarios)
+    cost_notes = estimate.notes if records else (["No repair price evidence available."] if scenarios else [])
+    cost = estimate.cost
 
     faulty = bool(accepted_damage or failed)
-    state = "damaged_or_faulty" if faulty else ("working" if works else None)
-    sale_recs = [r for r in records if r.price_type in SALE_TYPES]
-    working_sale = _span([r for r in sale_recs if r.device_state in ("working", "any")], currency)
-    as_is_sale = (
-        _span([r for r in sale_recs if r.device_state in (state, "any")], currency)
-        if state
-        else _span(sale_recs, currency)  # unknown function: span damaged to working
-    )
-    replacement = _span([r for r in records if r.price_type == "asking_price" and r.device_state in ("working", "any")], currency)
+    as_is_state = "damaged_or_faulty" if faulty else ("working" if works else None)
+    working_channels = channel_estimates(records, "working", currency)
+    as_is_channels = channel_estimates(records, as_is_state, currency) if as_is_state else []
+    replacement_recs = [r for r in records if r.price_type == "asking_price" and r.device_state == "working" and r.match_level in CALC_MATCH]
+    replacement = _span(replacement_recs, currency)
+
+    needs_repair = bool(scenarios)
+    offer_as_is = not safety.blocked
+    offer_repair_resell = needs_repair
+    sale_sets = ([as_is_channels] if offer_as_is and as_is_state else []) + ([working_channels] if offer_repair_resell else [])
+    basis = common_basis(sale_sets)
 
     options: list[ActionOption] = []
 
-    def option(action, summary, prereq=(), tradeoffs=(), uncertainty=(), gross=None, rcost=None, net=None, avoided=None, note=""):
+    def option(action, summary, prereq=(), tradeoffs=(), uncertainty=(), **money):
         options.append(ActionOption(
             action=action, title=TITLES[action], summary=summary, prerequisites=list(prereq),
-            tradeoffs=list(tradeoffs), uncertainty=list(uncertainty), gross_sale=gross,
-            repair_cost=rcost, net_proceeds=net, avoided_cost=avoided, financial_note=note,
+            tradeoffs=list(tradeoffs), uncertainty=list(uncertainty), **money,
         ))
 
-    needs_repair = bool(scenarios)
+    def sale_status(chosen: SaleChannelEstimate | None, extra_conditional: bool) -> str:
+        if chosen is None:
+            return "insufficient"
+        if chosen.price_type == "asking_price" or basis is None or extra_conditional:
+            return "conditional"
+        return "complete"
+
+    def gaps_note(gaps: list[str]) -> str:
+        return (" Conditional because " + "; ".join(gaps) + ". The estimate assumes the device's condition is as recorded.") if gaps else ""
+
+    def basis_note(chosen: SaleChannelEstimate | None) -> str:
+        if chosen is None:
+            return "No local sale evidence for this condition."
+        text = f"Gross sale uses {CHANNEL_LABELS[chosen.price_type]} ({chosen.records} record(s)); other channels are shown separately, not averaged."
+        if chosen.price_type == "asking_price":
+            text += " Asking prices are listing prices, not verified sale proceeds."
+        if basis is None:
+            text += " The options could not be compared on one common channel, so the comparison is conditional."
+        return text + " Selling fees are not included."
+
     inspection = "Professional inspection of the suspected safety risk before any power-on or charging."
     unknown_func = [] if func_complete else ["Function not fully checked; outcome depends on actual function."]
+    reuse_note = ("Reuse earns no sale proceeds. The value shown is the avoided cost of buying a similar used device, "
+                  "based on asking prices, not income.")
 
     if not safety.blocked and not power_failed:
         cond = [] if works else ["Confirm the device works for your needs."]
         option("reuse", "Keep using the device as it is.", prereq=cond,
                tradeoffs=["No cash income; avoids buying a replacement."] + (["Visible damage stays unrepaired."] if accepted_damage else []),
-               uncertainty=unknown_func, avoided=replacement,
-               note="Reuse earns no sale proceeds. The value shown is the avoided cost of buying a similar used device (asking prices), not income.")
-        option("resell_as_is", "Sell the device in its current condition with an honest description.",
-               prereq=["Back up and erase your data; remove accounts and SIM/memory cards."],
-               tradeoffs=["Buyer takes on any repair."],
-               uncertainty=unknown_func + (["Range spans damaged to working prices because function is unknown."] if state is None else []),
-               gross=as_is_sale, net=as_is_sale,
-               note="Gross range from local asking prices, buyback offers or evidenced sales; selling fees are not included. Asking prices are not completed sales.")
-    elif power_failed and not safety.blocked:
-        option("resell_as_is", "Sell as not working / for parts, stating that it does not power on.",
-               prereq=["Describe the fault honestly."], tradeoffs=["Lower price than a working device."],
-               uncertainty=["Cause of the power failure is unknown."], gross=as_is_sale, net=as_is_sale,
-               note="Gross range for damaged or faulty devices; fees not included.")
+               uncertainty=unknown_func, gross_sale=None, repair_cost=None, net_proceeds=None, avoided_cost=replacement,
+               financial_status="conditional" if replacement else "insufficient", financial_note=reuse_note)
+
+    if offer_as_is:
+        if as_is_state is None:
+            # Unknown function: show both condition scenarios instead of one merged value.
+            scenarios_by_state = channel_estimates(records, "working", currency) + channel_estimates(records, "damaged_or_faulty", currency)
+            option("resell_as_is", "Sell the device in its current condition with an honest description.",
+                   prereq=["Back up and erase your data; remove accounts and SIM/memory cards.", "Check how it works so it can be described honestly."],
+                   tradeoffs=["Buyer takes on any repair."],
+                   uncertainty=unknown_func + ["The sale value depends on whether it works; both condition scenarios are shown."],
+                   sale_channels=scenarios_by_state, gross_sale=None, repair_cost=None, net_proceeds=None, avoided_cost=None,
+                   financial_status="conditional" if scenarios_by_state else "insufficient",
+                   financial_note="Not ranked: without complete functional checks the device condition, and so its price, is unknown.")
+        else:
+            chosen = pick(as_is_channels, basis)
+            summary = ("Sell as not working / for parts, stating that it does not power on." if power_failed
+                       else "Sell the device in its current condition with an honest description.")
+            option("resell_as_is", summary,
+                   prereq=["Back up and erase your data; remove accounts and SIM/memory cards."] if not power_failed else ["Describe the fault honestly."],
+                   tradeoffs=["Buyer takes on any repair."] if not power_failed else ["Lower price than a working device."],
+                   uncertainty=unknown_func + (["Cause of the power failure is unknown."] if power_failed else []),
+                   sale_channels=as_is_channels, sale_basis=chosen.price_type if chosen else None,
+                   gross_sale=chosen.range if chosen else None, repair_cost=None,
+                   net_proceeds=chosen.range if chosen else None, avoided_cost=None,
+                   financial_status=sale_status(chosen, bool(condition_gaps)),
+                   financial_note=basis_note(chosen) + gaps_note(condition_gaps))
 
     if needs_repair:
         prereq = ([inspection] if safety.blocked else []) + ["Get a quote for the specific fault before paying for repair."]
         if power_failed or "charging" in failed:
             prereq.append("Have a technician diagnose the cause; a basic symptom does not identify the failed part.")
+        if "charging" in failed and not accessory_ruled_out:
+            prereq.append("Before buying anything, test with a charger and cable you know work. This check costs nothing "
+                          "if you can borrow one; if charging then works, only the accessory needs replacing.")
+        cost_flag = "" if estimate.complete else " The repair cost is incomplete, so this comparison is conditional."
+        if repair_gaps:
+            cost_flag += " A priced repair does not prove the device will work afterwards." + gaps_note(repair_gaps)
+        avoided = _minus(replacement, cost) if replacement and cost else None
         option("repair_then_reuse", "Repair the identified issues, then keep using the device.", prereq=prereq,
                tradeoffs=["Pays repair cost; extends the device's life."], uncertainty=cost_notes + unknown_func,
-               rcost=cost, avoided=_minus(replacement, cost) if replacement and cost else None,
-               note="No sale proceeds. Value is the avoided replacement cost minus the repair cost.")
+               gross_sale=None, repair_cost=cost, repair_cost_complete=estimate.complete, net_proceeds=None, avoided_cost=avoided,
+               financial_status="conditional" if avoided else "insufficient",
+               financial_note="No sale proceeds. Value is the avoided replacement cost (asking prices) minus the repair cost." + cost_flag)
+        chosen = pick(working_channels, basis)
+        net = _minus(chosen.range, cost) if chosen and cost else None
         option("repair_then_resell", "Repair the identified issues, then sell the device.", prereq=prereq,
                tradeoffs=["Repair cost is paid before sale; price is not guaranteed."], uncertainty=cost_notes + unknown_func,
-               gross=working_sale, rcost=cost, net=_minus(working_sale, cost) if working_sale and cost else None,
-               note="Net proceeds = gross sale (working device) minus repair cost. Labor is counted once.")
+               sale_channels=working_channels, sale_basis=chosen.price_type if chosen else None,
+               gross_sale=chosen.range if chosen else None, repair_cost=cost, repair_cost_complete=estimate.complete,
+               net_proceeds=net, avoided_cost=None,
+               financial_status=sale_status(chosen, not estimate.complete or bool(repair_gaps)) if net else "insufficient",
+               financial_note="Net proceeds = gross sale of a working device minus repair cost. " + basis_note(chosen) + cost_flag)
     elif safety.blocked:
         option("repair_then_reuse", "Have the device inspected and repaired, then keep using it.",
                prereq=[inspection], tradeoffs=["Inspection may find the repair is not worthwhile."],
-               uncertainty=["Repair needs and costs are unknown until inspection."], note="Insufficient data for repair costs.")
+               uncertainty=["Repair needs and costs are unknown until inspection."],
+               gross_sale=None, repair_cost=None, net_proceeds=None, avoided_cost=None,
+               financial_status="insufficient", financial_note="Insufficient data for repair costs.")
 
-    option("recycle", "Take the device to an e-waste recycler or collection point.",
-           prereq=(["Tell the recycler about the suspected battery issue."] if safety.blocked else [])
-           + ["Erase your data first if the device still works.", "Use a recycler that accepts this device type."],
-           tradeoffs=["Ends the device's life; materials may be recovered."],
-           uncertainty=["Recycler payment, if any, is not quantified."],
-           note="Recycling usually returns little or no money. Not quantified.")
+    # Repair economics are an economic finding only. Price evidence alone cannot show that a device
+    # has reached end of life, so Recycle is not offered; general disposal guidance stays separate.
+    working_value = pick(working_channels, basis) if needs_repair else None
+    if needs_repair and cost and working_value and cost.min >= working_value.range.max:
+        findings.append(
+            f"Repair may not be financially worthwhile: the lowest repair cost ({_money_text(cost)}) is at least the "
+            f"highest value of a working device ({_money_text(working_value.range)}). Reuse, as-is resale or passing "
+            "the device on may still make sense; this alone does not mean the device has reached end of life."
+        )
 
     if safety.blocked:
         findings.append("A suspected safety risk limits the options: no reuse or as-is resale before inspection.")
 
-    # Financial ranking: cash outcomes only. Reuse earns no cash, so it is explained, not mixed in.
-    cash_actions = ("resell_as_is", "repair_then_resell", "recycle")
-    cash = [o for o in options if o.action in cash_actions]
-    valued = sorted([o for o in cash if o.net_proceeds], key=lambda o: _mid(o.net_proceeds), reverse=True)
-    unranked = [o.action for o in cash if not o.net_proceeds]
-    fin_expl = ["Ordered by the midpoint of each net-proceeds range in local currency. Ranges are estimates, not quotes."]
-    for a, b in zip(valued, valued[1:]):
-        if a.net_proceeds.min <= b.net_proceeds.max:
-            fin_expl.append(f"{a.title} and {b.title} have overlapping ranges, so their order depends on actual prices and repair cost.")
+    # Financial ranking: cash outcomes only, definitive only with complete evidence.
+    cash = [o for o in options if o.action in ("resell_as_is", "repair_then_resell", "recycle")]
+    definitive = sorted([o for o in cash if o.financial_status == "complete" and o.net_proceeds], key=lambda o: _mid(o.net_proceeds), reverse=True)
+    conditional = sorted([o for o in cash if o.financial_status == "conditional" and o.net_proceeds], key=lambda o: _mid(o.net_proceeds), reverse=True)
+    unranked = [o.action for o in cash if o not in definitive and o not in conditional]
+    basis_text = (f"Sale options are compared on {CHANNEL_LABELS[basis]}, the most reliable channel available for all of them."
+                  if basis else "No single sale channel covers all sale options, so they could not be compared on one basis.")
+    fin_expl = ["Ordered by the midpoint of each net-proceeds range in local currency. Ranges are estimates, not quotes.", basis_text]
+    for group in (definitive, conditional):
+        for a, b in zip(group, group[1:]):
+            if a.net_proceeds.min <= b.net_proceeds.max:
+                fin_expl.append(f"{a.title} and {b.title} have overlapping ranges, so their order depends on actual prices and repair cost.")
+    if conditional:
+        fin_expl.append("Conditional (asking prices, partial or incomplete repair costs, or no common channel): "
+                        + ", ".join(o.title for o in conditional) + ".")
     if unranked:
         fin_expl.append("Not ranked (insufficient price data): " + ", ".join(TITLES[a] for a in unranked) + ".")
     for o in options:
@@ -287,8 +490,11 @@ def recommend(snap: AssessmentSnapshot) -> RecommendationResult:
                 f"{o.title} is not ranked here because it earns no cash. Its value is the avoided cost of buying a "
                 f"similar used device ({_money_text(o.avoided_cost)}), which only applies if you would otherwise buy one."
             )
-    financial = Ranking(basis="financial_value", order=[o.action for o in valued], unranked=unranked,
-                        explanation=fin_expl, complete=not [a for a in unranked if a != "recycle"] and bool(valued))
+    financial = Ranking(
+        basis="financial_value", order=[o.action for o in definitive], conditional=[o.action for o in conditional],
+        unranked=unranked, explanation=fin_expl,
+        complete=bool(definitive) and not conditional and not [a for a in unranked if a != "recycle"],
+    )
 
     present = {o.action for o in options}
     resource = Ranking(
@@ -302,10 +508,11 @@ def recommend(snap: AssessmentSnapshot) -> RecommendationResult:
         complete=True,
     )
     differ = None
-    if financial.order and resource.order and financial.order[0] != resource.order[0]:
-        differ = (f"The rankings differ: {TITLES[financial.order[0]]} scores best on available price evidence, "
-                  f"while {TITLES[resource.order[0]]} extends the device's life the most. There is no universal "
-                  "weighting between money and resource use; choose what matters to you.")
+    fin_top = (financial.order or financial.conditional or [None])[0]
+    if fin_top and resource.order and fin_top != resource.order[0]:
+        differ = (f"The rankings differ: {TITLES[fin_top]} scores best on available price evidence"
+                  f"{'' if financial.order else ' (conditional)'}, while {TITLES[resource.order[0]]} extends the "
+                  "device's life the most. There is no universal weighting between money and resource use; choose what matters to you.")
 
     simulated = any([
         snap.physical.source == "simulated",
@@ -323,4 +530,5 @@ def recommend(snap: AssessmentSnapshot) -> RecommendationResult:
         options=options, financial_ranking=financial, resource_ranking=resource,
         safety_constrained=safety.blocked, conditional_findings=findings,
         rankings_differ=differ, disclaimers=disclaimers,
+        disposal_guidance=DISPOSAL_GUIDANCE + ([BATTERY_GUIDANCE] if safety.blocked else []),
     )

@@ -2,6 +2,7 @@ import { AlertTriangle, ImagePlus, Loader2 } from 'lucide-react'
 import { useState } from 'react'
 import { viewLabel } from '../../content/devices'
 import { kindLabels, kindOrder, responseLabels } from '../../content/labels'
+import { effectiveObservation, hasOpenRisk } from '../../lib/observations'
 import { preparePhotos } from '../../lib/photos'
 import { useAssessment } from '../../state/AssessmentContext'
 import { emptyReview } from '../../state/assessmentReducer'
@@ -27,10 +28,12 @@ function ObservationCard({ observation }: { observation: Observation }) {
   const { state, actions } = useAssessment()
   const [error, setError] = useState('')
   const review = state.reviews[observation.id] ?? emptyReview
-  const followUp = state.followUps[observation.id]
-  const shown = followUp?.revised_observation ?? observation
+  const history = state.followUps[observation.id] ?? []
+  const shown = effectiveObservation(observation, history)
   const photos = state.photos.filter((p) => shown.views.includes(p.slot))
-  const isRisk = observation.kind === 'suspected_safety_risk'
+  // Highlight any risk still open in the history, not only the original kind.
+  const isRisk = hasOpenRisk(observation, history)
+  const priorRiskOnly = isRisk && shown.kind !== 'suspected_safety_risk'
   const canRecheck = review.response === 'disagree' || review.response === 'unsure'
 
   async function addExtra(files: File[]) {
@@ -44,7 +47,14 @@ function ObservationCard({ observation }: { observation: Observation }) {
       <p className={`flex items-center gap-2 text-[13px] tracking-[0.06em] uppercase ${isRisk ? 'text-danger' : 'text-muted'}`}>
         {isRisk && <AlertTriangle aria-hidden className="size-4" />}
         {kindLabels[shown.kind]}
+        {isRisk && shown.kind !== observation.kind && ' (found in re-check)'}
       </p>
+      {priorRiskOnly && (
+        <p role="alert" className="mt-2 text-[14px] text-danger">
+          An earlier re-check identified a suspected safety risk here. It stays unresolved until a re-check with new
+          photos shows the issue is not present.
+        </p>
+      )}
       <h4 className="mt-1 text-[17px] font-medium text-ink">{shown.part}</h4>
       <p className="mt-2 text-[15px] text-ink">{shown.description}</p>
       <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-[14px]">
@@ -128,11 +138,20 @@ function ObservationCard({ observation }: { observation: Observation }) {
               )}
             </div>
           )}
-          {followUp && (
-            <p className="text-[14px] text-ink" aria-live="polite">
-              <span className="font-medium">Re-check result{followUp.source === 'simulated' ? ' (simulated)' : ''}:</span>{' '}
-              {outcomeText[followUp.outcome]} {followUp.explanation}
-            </p>
+          {history.length > 0 && (
+            <ol className="space-y-1 text-[14px] text-ink" aria-live="polite" aria-label="Re-check history">
+              {history.map((f, i) => (
+                <li key={i}>
+                  <span className="font-medium">
+                    Re-check {i + 1}
+                    {f.source === 'simulated' ? ' (simulated)' : ''}:
+                  </span>{' '}
+                  {outcomeText[f.outcome]}
+                  {f.revised_observation && ` Now: ${kindLabels[f.revised_observation.kind]} — ${f.revised_observation.part}.`}{' '}
+                  {f.explanation}
+                </li>
+              ))}
+            </ol>
           )}
         </div>
       )}

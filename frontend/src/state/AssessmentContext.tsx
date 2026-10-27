@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useMemo, useReducer, useRef, type ReactNode } from 'react'
 import { api, ApiError, type RequestContext } from '../services/api'
-import type { CheckAnswer, ConfirmedIdentity, DeviceType, PriceResearch, ServicesResult, UserResponse } from '../types/api'
+import type { AccessoryCheck, CheckAnswer, ConfirmedIdentity, DeviceType, PriceResearch, ServicesResult, UserResponse } from '../types/api'
 import type { SlotPhoto } from '../types/assessment'
 import { useAnnouncer } from './Announcer'
 import {
@@ -10,7 +10,8 @@ import {
   type AssessmentState,
   type LocationState,
 } from './assessmentReducer'
-import { selectReviews, selectSnapshot } from './selectors'
+import { effectiveObservation } from '../lib/observations'
+import { selectEffectiveObservations, selectReviews, selectSnapshot } from './selectors'
 
 interface AssessmentActions {
   setDevice(deviceType: DeviceType): void
@@ -26,6 +27,7 @@ interface AssessmentActions {
   confirmReview(): void
   answerCheck(checkId: string, answer: CheckAnswer): void
   setCheckNote(checkId: string, note: string): void
+  setAccessoryCheck(checkId: string, accessory: AccessoryCheck): void
   submitChecks(): void
   setIdentity(identity: ConfirmedIdentity): void
   setLocation(location: LocationState): void
@@ -131,21 +133,25 @@ export function AssessmentProvider({ children }: { children: ReactNode }) {
       },
       requestFollowUp(id) {
         const s = stateRef.current
-        const observation = s.analysis.data?.observations.find((o) => o.id === id)
+        const original = s.analysis.data?.observations.find((o) => o.id === id)
         const review = s.reviews[id]
-        if (!s.deviceType || !observation || !review?.response) return
+        if (!s.deviceType || !original || !review?.response) return
+        // Re-check the current effective observation, and send the earlier results as risk context.
+        const history = s.followUps[id] ?? []
+        const observation = effectiveObservation(original, history)
         const originals = s.photos.filter((p) => observation.views.includes(p.slot))
         const extras = review.extraPhotos
         dispatch({ type: 'followUp/start', id })
         const key = stateRef.current.analysisKey
+        const seq = stateRef.current.reviews[id]?.followUpSeq ?? 0
         api
-          .followUp(s.deviceType, observation, review.response, review.note, originals, extras, ctx())
+          .followUp(s.deviceType, observation, history, review.response, review.note, originals, extras, ctx())
           .then((result) => {
             extras.forEach((p) => URL.revokeObjectURL(p.url))
-            dispatch({ type: 'followUp/success', key, id, result })
+            dispatch({ type: 'followUp/success', key, id, seq, result })
             announce('Re-check complete.')
           })
-          .catch((err: unknown) => dispatch({ type: 'followUp/failure', key, id, error: message(err) }))
+          .catch((err: unknown) => dispatch({ type: 'followUp/failure', key, id, seq, error: message(err) }))
       },
 
       confirmReview() {
@@ -172,6 +178,9 @@ export function AssessmentProvider({ children }: { children: ReactNode }) {
       setCheckNote(checkId, note) {
         dispatch({ type: 'checks/note', checkId, note })
       },
+      setAccessoryCheck(checkId, accessory) {
+        dispatch({ type: 'checks/accessory', checkId, accessory })
+      },
       submitChecks() {
         const s = stateRef.current
         if (!s.deviceType || !s.analysis.data) return
@@ -197,11 +206,12 @@ export function AssessmentProvider({ children }: { children: ReactNode }) {
         if (s.research.status === 'processing') return
         dispatch({ type: 'research/start' })
         const key = stateRef.current.inputKey
-        const followUps = s.followUps
-        const observations = s.analysis.data.observations
-          .filter((o) => followUps[o.id]?.outcome !== 'not_supported')
-          .map((o) => followUps[o.id]?.revised_observation ?? o)
-        const failed = (s.functional.data?.outcomes ?? []).filter((o) => o.status === 'fail').map((o) => o.check_id)
+        const observations = selectEffectiveObservations(s)
+          .filter((o) => !o.withdrawn)
+          .map((o) => o.current)
+        const outcomes = s.functional.data?.outcomes ?? []
+        const failed = outcomes.filter((o) => o.status === 'fail').map((o) => o.check_id)
+        const accessoryRuledOut = outcomes.some((o) => o.check_id === 'charging' && o.accessory_check === 'known_working')
         const loc = s.location
         announce('Searching local prices and services.')
 
@@ -215,6 +225,7 @@ export function AssessmentProvider({ children }: { children: ReactNode }) {
               condition_summary: observations.filter((o) => o.kind !== 'unassessable').map((o) => `${o.kind}: ${o.part}`),
               damaged_parts: observations.filter((o) => o.kind === 'physical_damage').map((o) => o.part),
               failed_checks: failed,
+              accessory_ruled_out: accessoryRuledOut,
             },
             ctx(),
           )

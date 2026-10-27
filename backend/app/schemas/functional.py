@@ -20,7 +20,7 @@ CheckStatus = Literal[
 class RiskStatus(BaseModel):
     observation_id: str
     part: str
-    status: Literal["confirmed_by_user", "unresolved", "cleared_after_follow_up"]
+    status: Literal["confirmed_by_user", "unresolved", "identified_in_follow_up", "cleared_after_follow_up"]
     explanation: str
 
 
@@ -50,10 +50,16 @@ class PlanRequest(BaseModel):
     reviews: list[ObservationReview]
 
 
+# For the charging check only: which charger was used. "known_working" means the user tested with
+# a charger and cable they know work, which rules out the accessory as the cause (a no-cost check).
+AccessoryCheck = Literal["known_working", "unverified"]
+
+
 class CheckResponse(BaseModel):
     check_id: str
     answer: CheckAnswer | None = None
     note: str = ""
+    accessory_check: AccessoryCheck | None = None
 
 
 class EvaluateRequest(BaseModel):
@@ -68,6 +74,7 @@ class CheckOutcome(BaseModel):
     label: str
     status: CheckStatus
     note: str
+    accessory_check: AccessoryCheck | None = None
 
 
 class FunctionalEvaluation(BaseModel):

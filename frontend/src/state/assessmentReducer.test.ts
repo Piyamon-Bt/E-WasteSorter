@@ -61,7 +61,7 @@ describe('assessment reducer', () => {
     expect(selectUnreviewed(s).map((o) => o.id)).toEqual(['obs-1'])
     s = assessmentReducer(s, { type: 'review/respond', id: 'obs-1', response: 'disagree' })
     expect(selectUnreviewed(s)).toHaveLength(0)
-    expect(selectReviews(s)[0]).toMatchObject({ observation_id: 'obs-1', response: 'disagree', follow_up: null })
+    expect(selectReviews(s)[0]).toMatchObject({ observation_id: 'obs-1', response: 'disagree', follow_ups: [] })
   })
 
   it('changing a review invalidates later steps', () => {

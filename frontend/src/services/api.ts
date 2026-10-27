@@ -95,6 +95,7 @@ export const api = {
   followUp(
     deviceType: DeviceType,
     observation: Observation,
+    history: FollowUpResult[],
     response: UserResponse,
     note: string,
     originals: SlotPhoto[],
@@ -104,6 +105,7 @@ export const api = {
     const form = new FormData()
     form.append('device_type', deviceType)
     form.append('observation', JSON.stringify(observation))
+    form.append('history', JSON.stringify(history))
     form.append('response', response)
     form.append('note', note)
     for (const p of originals) {
@@ -140,6 +142,7 @@ export const api = {
       condition_summary: string[]
       damaged_parts: string[]
       failed_checks: string[]
+      accessory_ruled_out: boolean
     },
     ctx: RequestContext,
   ) => request<PriceResearch>('/api/market/prices', json(body), ctx),
