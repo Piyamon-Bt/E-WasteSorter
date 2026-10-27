@@ -1,0 +1,26 @@
+# Secrets and local configuration
+.env
+backend/.env
+frontend/.env
+frontend/.env.local
+
+# Local usage ledger (cost metadata; keep it locally, do not commit)
+backend/data/*.jsonl
+
+# Python
+backend/.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+
+#dataset
+dataset/
